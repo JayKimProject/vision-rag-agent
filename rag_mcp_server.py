@@ -3,7 +3,7 @@ MCP server exposing web tools to the RAG agent.
 
 Tools:
   - fetch_url     : fetch any URL as clean text/markdown
-  - web_search    : DuckDuckGo free search (no API key)
+  - web_search    : web search via Tavily (if API key set) or DuckDuckGo fallback
   - wikipedia     : Wikipedia article search
 
 Run standalone:  python rag_mcp_server.py
@@ -12,9 +12,20 @@ Used as subprocess by mcp_client.py via stdio transport.
 from __future__ import annotations
 
 import json
+import os
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+
+# Optional Tavily integration — used when TAVILY_API_KEY is set
+_tavily_client = None
+_TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
+if _TAVILY_API_KEY:
+    try:
+        from tavily import TavilyClient
+        _tavily_client = TavilyClient(api_key=_TAVILY_API_KEY)
+    except Exception:
+        _tavily_client = None
 
 mcp = FastMCP("vision-rag-web-tools")
 
@@ -84,14 +95,44 @@ def fetch_url(url: str, max_length: int = 8000) -> str:
 
 @mcp.tool()
 def web_search(query: str, max_results: int = 8) -> str:
-    """Search the web using DuckDuckGo (free, no API key required).
+    """Search the web and return a JSON list of results with title, snippet, and URL.
 
-    Returns a JSON list of results with title, snippet, and URL.
+    Uses Tavily when TAVILY_API_KEY is set, otherwise falls back to DuckDuckGo.
 
     Args:
         query: The search query.
         max_results: Maximum number of results to return (default 8).
     """
+    if _tavily_client is not None:
+        return _web_search_tavily(query, max_results)
+    return _web_search_duckduckgo(query, max_results)
+
+
+def _web_search_tavily(query: str, max_results: int) -> str:
+    """Search via Tavily API."""
+    try:
+        response = _tavily_client.search(
+            query=query,
+            max_results=max_results,
+            search_depth="basic",
+        )
+        results = [
+            {
+                "title": r.get("title", ""),
+                "snippet": r.get("content", ""),
+                "url": r.get("url", ""),
+            }
+            for r in response.get("results", [])
+        ]
+        if not results:
+            return json.dumps({"message": f"No results found for: {query}"})
+        return json.dumps(results, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def _web_search_duckduckgo(query: str, max_results: int) -> str:
+    """Search via DuckDuckGo Instant Answer API (free, no key required)."""
     try:
         resp = httpx.get(
             "https://api.duckduckgo.com/",
